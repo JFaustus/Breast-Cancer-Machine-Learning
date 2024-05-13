@@ -1,0 +1,256 @@
+---
+title: 'Machine Learning - Lab 2 Badge'
+author: "James Frye"
+date: "`r format(Sys.Date(),'%B %e, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(purrr)
+library(janitor)
+library(purrr)
+library(caret)
+library(ggplot2)
+library(caTools)
+
+Bcancer <- read_csv("breast-cancer.csv")
+
+Bcancer$diagnosis <- factor(Bcancer$diagnosis)
+
+#ID isn't useful all the time so getting rid of it
+no.id <- Bcancer[,-1]
+
+#need no diagnosis to scale data
+
+no.diag <- Bcancer[,-(1:2)]
+  
+#colMeans(no.diag)
+#apply(no.diag, 2, sd)
+
+#PCA performance
+pr.out <- prcomp(no.diag, scale = TRUE, center = TRUE)
+
+#summary of PCA
+summary(pr.out)
+
+#preprocessing for scree
+pr.var <- pr.out$sdev^2
+
+pve <- pr.var / sum(pr.var)
+
+#scree plot
+plot(pve, xlab = "Principal Component", ylab = "Proportion of Variance Explained",  ylim = c(0, 0.8), type = "b")
+
+plot(cumsum(pve), xlab = "Principal Component", ylab = "Proportion of Variance Explained",  ylim = c(0, 1), type = "b")
+
+#counting number of malignant and benign
+Bcancer %>%
+  count(diagnosis)
+```
+
+```{r}
+#splits
+set.seed(22)
+
+train_test_split <- initial_split(no.id, prop = .80)
+
+data_train <- training(train_test_split)
+
+data_test  <- testing(train_test_split)
+```
+
+```{r}
+
+#model for glm
+
+my_rec <- recipe(diagnosis ~ ., data = data_train)
+
+my_mod <-
+    logistic_reg() %>% 
+    set_engine("glm") %>%
+    set_mode("classification") 
+
+my_wf <-
+    workflow() %>% # create a workflow
+    add_model(my_mod) %>% # add the model we wrote above
+    add_recipe(my_rec) # add our recipe we wrote above
+
+class_metrics <- metric_set(accuracy, ppv, npv, kap)
+
+final_fit <- last_fit(my_wf, train_test_split, metrics = class_metrics)
+
+final_fit %>% 
+    collect_predictions() %>% # see test set predictions
+    select(.pred_class, diagnosis) %>% # just to make the output easier to view 
+    mutate(correct = .pred_class == diagnosis) %>% # create a new variable, correct, telling us when the model was and was not correct
+    tabyl(correct)
+
+
+```
+
+```{r}
+
+#confusion matrix
+collect_predictions(final_fit) %>% 
+    conf_mat(.pred_class, diagnosis)
+
+
+
+```
+
+# 
+
+```{r}
+
+library(WVPlots)
+
+#glm model with matrix to test against the other glm model
+
+glmmodel <- glm(diagnosis ~., family = "binomial", data_train)
+
+p <- predict(glmmodel, data_test, type = "response")
+
+borm <- ifelse(p > 0.5, "M", "B")
+
+p_class <- factor(borm, levels = levels(data_test[["diagnosis"]]))
+
+confusionMatrix(p_class, data_test[["diagnosis"]], mode = 'prec_recall')
+
+#setting up gain curve plot
+
+data_test$pred <- predict(glmmodel,  data_test, type = "response")
+
+GainCurvePlot(data_test, "pred", "diagnosis", "glmmodel")
+```
+
+```{r}
+#another GLM model with caret
+
+#the control for my caret functions
+myControl <- trainControl(
+  method = "cv",
+  number = 10,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  verboseIter = TRUE
+)
+
+themodel2 <- train(diagnosis ~., data_train, method = "glm", trControl = myControl, preProcess = c("center","scale"))
+
+data_test$pred <- predict(themodel2, data_test)
+
+confusionMatrix(data_test$pred,data_test$diagnosis, mode = 'prec_recall')
+
+postResample(data_test$pred, data_test$diagnosis)
+
+print(themodel2)
+```
+
+```{r}
+#support vector machine
+
+svm1 <- train(diagnosis ~., data = data_train, method = "svmLinear", trControl = myControl, preProcess = c("center","scale"))
+
+data_test$pred <- predict(themodel2, data_test)
+
+confusionMatrix(data_test$pred,data_test$diagnosis, mode = 'prec_recall')
+
+postResample(data_test$pred, data_test$diagnosis)
+
+svm1
+```
+
+```{r}
+#Random Forest Model
+library(MLmetrics)
+library(ranger)
+
+random_model <- train(
+  diagnosis ~.,
+  tuneLength = 3,
+  data = data_train, 
+  method = "ranger",
+  trControl = myControl,
+  preProcess = c("center","scale")
+)
+
+data_test$pred <- predict(random_model, data_test)
+
+confusionMatrix(data_test$pred,data_test$diagnosis, mode = 'prec_recall')
+
+postResample(data_test$pred, data_test$diagnosis)
+
+print(random_model)
+
+plot(random_model)
+```
+
+```{r}
+
+#GLMNET model
+
+library(glmnet)
+
+net_model <- train(
+  diagnosis ~., 
+  data_train,
+  tuneGrid = expand.grid(
+    alpha = 0:1,
+    lambda  = seq(0.0001, 1, length = 20)
+    ),
+  method = "glmnet",
+  trControl = myControl,
+  preProcess = c("center","scale")
+)
+
+print(net_model)
+
+data_test$pred <- predict(net_model, data_test)
+
+confusionMatrix(data_test$pred,data_test$diagnosis, mode = 'prec_recall')
+
+postResample(data_test$pred, data_test$diagnosis)
+
+max(net_model[["results"]][["ROC"]])
+
+plot(net_model)
+```
+
+```{r}
+#Simple Decision Tree model
+
+library(rpart)
+library(rpart.plot)
+
+tree_model <- rpart(diagnosis ~., method = "class",data = data_train, control = rpart.control(cp = 0, maxdepth = 6))
+
+#predictions
+data_test$pred <- predict(tree_model, data_test, type = "class")
+
+mean(data_test$pred == data_test$outcome)
+
+rpart.plot(tree_model)
+
+rpart.plot(tree_model, type = 3, box.palette = c("red", "green"), fallen.leaves = TRUE)
+
+
+```
+
+```{r}
+
+#comparing all the models
+model_list <- list(glmnet = net_model, randomforest = random_model, glm = themodel2, SVM = svm1)
+
+resamples2 <- resamples(model_list)
+
+summary(resamples2)
+
+colAUC(p, data_test[["diagnosis"]], plotROC = TRUE)
+
+```
